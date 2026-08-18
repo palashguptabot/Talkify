@@ -17,6 +17,7 @@ final class AppSettings {
     static let soundsEnabled = "dictationSoundsEnabled"
     static let soundVolume = "dictationSoundVolume"
     static let voiceVisual = "hudVoiceVisual"
+    static let draftStyle = "hudDraftStyle"
     static let waveformStyle = "hudWaveformStyle"
     static let revealStyle = "hudRevealStyle"
     static let longDraftStyle = "hudLongDraftStyle"
@@ -67,6 +68,12 @@ final class AppSettings {
 
   var voiceVisual: HUDVoiceVisualStyle {
     didSet { defaults.set(voiceVisual.rawValue, forKey: Keys.voiceVisual) }
+  }
+
+  /// What happens to the draft when the session ends: inserted as today,
+  /// or held in the HUD as an editable field until Return or Escape.
+  var draftStyle: HUDDraftStyle {
+    didSet { defaults.set(draftStyle.rawValue, forKey: Keys.draftStyle) }
   }
 
   var waveformStyle: HUDWaveformStyle {
@@ -180,6 +187,8 @@ final class AppSettings {
     transcriptDestination = Self.stored(in: defaults, key: Keys.transcriptDestination) ?? .besideSource
     transcriptFolder = (defaults.string(forKey: Keys.transcriptFolder)).map { URL(filePath: $0) }
     voiceVisual = Self.stored(in: defaults, key: Keys.voiceVisual) ?? .waveform
+    // A missing pick must keep today's flow: the editable draft is opt-in.
+    draftStyle = Self.stored(in: defaults, key: Keys.draftStyle) ?? .pasteOnRelease
     waveformStyle = Self.stored(in: defaults, key: Keys.waveformStyle) ?? .chartLine
     revealStyle = Self.stored(in: defaults, key: Keys.revealStyle) ?? .slide
     longDraftStyle = Self.stored(in: defaults, key: Keys.longDraftStyle) ?? .growDown
@@ -227,6 +236,7 @@ final class AppSettings {
 struct DictationSessionSettings: Equatable {
   let sounds: DictationSoundSettings
   let voiceVisual: HUDVoiceVisualStyle
+  let draftStyle: HUDDraftStyle
   let waveformStyle: HUDWaveformStyle
   let revealStyle: HUDRevealStyle
   let longDraftStyle: HUDLongDraftStyle
@@ -250,6 +260,7 @@ struct DictationSessionSettings: Equatable {
       volume: settings.dictationSoundVolume
     )
     voiceVisual = settings.voiceVisual
+    draftStyle = settings.draftStyle
     waveformStyle = settings.waveformStyle
     revealStyle = settings.revealStyle
     longDraftStyle = settings.longDraftStyle

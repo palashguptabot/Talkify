@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// The impure half of Direct Dictation: owns the services, translates
 /// trigger-monitor events into DictationSessionMachine actions, runs the
@@ -275,6 +276,8 @@ final class DirectDictationController {
       send(.triggerReleased(now: .now))
     case .cancelPressed:
       send(.escapePressed)
+    case .returnPressed:
+      send(.returnPressed)
     case .readAloudPressed:
       send(.readAloudPressed)
     }
@@ -308,6 +311,8 @@ final class DirectDictationController {
       sessionStartTask?.cancel()
     case let .setEscapeCapture(enabled):
       keyEventMonitor?.setEscapeCaptureEnabled(enabled)
+    case let .setReturnCapture(enabled):
+      keyEventMonitor?.setReturnCaptureEnabled(enabled)
     case .startNoSpeechTimer:
       startNoSpeechTimer()
     case .stopNoSpeechTimer:
@@ -329,6 +334,10 @@ final class DirectDictationController {
       }
     case .showFinalizing:
       hudController.showFinalizing()
+    case .showEditableDraft:
+      showEditableDraft()
+    case .pasteDraft:
+      pasteDraft()
     case .hideHUD:
       hudController.hide()
     case let .notifyRecording(isRecording):
@@ -336,6 +345,8 @@ final class DirectDictationController {
         focusedTarget = nil
         sessionStartTask = nil
         currentSessionSettings = nil
+        sessionSpeakingDuration = 0
+        pendingReplacement = nil
       }
       onRecordingStateChange?(isRecording, currentSessionSettings)
     case .triggerReadAloud:
@@ -348,6 +359,16 @@ final class DirectDictationController {
   private var pendingLiveText: String?
 
   private func checkAndBegin() {
+    // A replacement round targets the HUD's own selection: the session's
+    // outer target stays captured, and the round's words splice into the
+    // held draft when they arrive. Nothing here can reject a round — the
+    // recognizer the session already runs on is warm by definition.
+    if machine.isReviewing {
+      pendingReplacement = captureDraftSelection()
+      send(.beginApproved)
+      return
+    }
+
     guard isPrepared else {
       hudController.showMessage(preparationFailureMessage ?? "Preparing speech…")
       send(.beginRejected)
@@ -428,31 +449,132 @@ final class DirectDictationController {
     pendingLiveText = nil
   }
 
-  /// Finishes recognition and routes the insertion outcome to its terminal UI.
+  /// Finishes recognition and routes the outcome to its terminal UI.
   ///
-  /// - Parameter speakingDuration: The completed session's measured speech time.
+  /// The default path inserts as before. The editable-draft variant holds
+  /// the text in the HUD instead: the machine moves to `.reviewing`, where
+  /// Return pastes, the trigger starts a replacement round, and Escape
+  /// discards. A replacement round's text is spliced into the held draft at
+  /// the selection the round began with, and every round's speech time
+  /// joins the session's total for Insights.
+  ///
+  /// - Parameter speakingDuration: The completed round's measured speech time.
   private func finishRecognition(speakingDuration: TimeInterval) {
     Task { [weak self] in
       guard let self else { return }
       do {
         let text = try await speechService.finish()
-        hudController.hide()
-        let outcome = await textInsertionService.insert(text, into: focusedTarget)
-        switch outcome {
-        case .inserted, .copiedToClipboard:
-          hudController.playPasteSound()
-          send(.sessionEnded)
-          let wordCount = UsageMetrics.wordCount(in: text)
-          await usageTracker.recordSession(
-            wordCount: wordCount,
-            speakingDuration: speakingDuration
-          )
-        case .unavailable:
-          send(.sessionEnded)
-          hudController.showMessage("Couldn't insert text")
+        sessionSpeakingDuration += speakingDuration
+        if let pending = pendingReplacement {
+          commitReplacement(text, into: pending)
+        } else if currentSessionSettings?.draftStyle == .editableDraft {
+          // The main round of an editable-draft session: hold the draft
+          // for review instead of inserting. An empty draft has nothing
+          // to review, so the session simply ends as today.
+          if text.isEmpty {
+            hudController.hide()
+            send(.sessionEnded)
+          } else {
+            hudController.setDraft(text)
+            send(.finishCompleted)
+          }
+        } else {
+          hudController.hide()
+          let outcome = await textInsertionService.insert(text, into: focusedTarget)
+          switch outcome {
+          case .inserted, .copiedToClipboard:
+            hudController.playPasteSound()
+            send(.sessionEnded)
+            let wordCount = UsageMetrics.wordCount(in: text)
+            await usageTracker.recordSession(
+              wordCount: wordCount,
+              speakingDuration: speakingDuration
+            )
+          case .unavailable:
+            send(.sessionEnded)
+            hudController.showMessage("Couldn't insert text")
+          }
         }
       } catch {
         fail(message: error.localizedDescription, wasCancelled: false)
+      }
+    }
+  }
+
+  /// The draft and the selection a replacement round began with, so the
+  /// round can put the draft back (when it delivers nothing) or splice its
+  /// words into exactly that range (when it does).
+  private struct PendingReplacement {
+    let draft: String
+    let range: NSRange
+  }
+
+  private var pendingReplacement: PendingReplacement?
+  /// The session's accumulated speech time across every round, recorded
+  /// when the reviewed draft is pasted.
+  private var sessionSpeakingDuration: TimeInterval = 0
+
+  /// Freezes the draft and the field's selection before the listening state
+  /// overwrites the band with the round's live text.
+  private func captureDraftSelection() -> PendingReplacement? {
+    let draft = hudController.draftText
+    let range = hudController.draftSelectionRange
+      ?? NSRange(location: draft.utf16.count, length: 0)
+    return PendingReplacement(draft: draft, range: range)
+  }
+
+  /// Commits a replacement round's recognized text into the held draft: it
+  /// replaces exactly the selection the round began with, and the cursor
+  /// lands after the inserted words. A round that delivered nothing leaves
+  /// the draft untouched.
+  private func commitReplacement(_ text: String, into pending: PendingReplacement) {
+    pendingReplacement = nil
+    if text.isEmpty {
+      hudController.setDraft(pending.draft)
+    } else if let range = Range(pending.range, in: pending.draft) {
+      let draft = pending.draft.replacingCharacters(in: range, with: text)
+      let cursor = String.Index(utf16Offset: pending.range.upperBound, in: draft)
+      hudController.setDraft(draft, selection: TextSelection(insertionPoint: cursor))
+    } else {
+      hudController.setDraft(pending.draft)
+    }
+    send(.finishCompleted)
+  }
+
+  /// Puts the HUD back into the review: the field returns with the draft
+  /// restored if a replacement round never delivered.
+  private func showEditableDraft() {
+    if let pending = pendingReplacement {
+      pendingReplacement = nil
+      hudController.setDraft(pending.draft)
+    }
+    hudController.showEditableDraft()
+  }
+
+  /// Return while the draft is under review: the edited draft is delivered
+  /// to the session's target exactly like the release flow delivers a
+  /// finished session — same service, same clipboard-restore semantics,
+  /// same paste sound. The panel resigns key with the retract, which hands
+  /// the captured control back its AX focus, so the insertion validates
+  /// and pastes into the right place.
+  private func pasteDraft() {
+    Task { [weak self] in
+      guard let self else { return }
+      let text = hudController.draftText
+      hudController.hide()
+      let outcome = await textInsertionService.insert(text, into: focusedTarget)
+      switch outcome {
+      case .inserted, .copiedToClipboard:
+        hudController.playPasteSound()
+        send(.sessionEnded)
+        let wordCount = UsageMetrics.wordCount(in: text)
+        await usageTracker.recordSession(
+          wordCount: wordCount,
+          speakingDuration: sessionSpeakingDuration
+        )
+      case .unavailable:
+        send(.sessionEnded)
+        hudController.showMessage("Couldn't insert text")
       }
     }
   }
@@ -472,7 +594,12 @@ final class DirectDictationController {
         guard let self else { return }
         await speechService.cancel()
         send(.sessionEnded)
-        hudController.showMessage(message)
+        // A replacement round that failed leaves the session back in
+        // `.reviewing` with the draft intact; the review coming back IS
+        // the signal, and a message would evict it.
+        if !machine.isReviewing {
+          hudController.showMessage(message)
+        }
       }
     } else {
       perform(effects)
