@@ -33,6 +33,10 @@ final class DirectDictationController {
   private var permissionTask: Task<Void, Never>?
   private var permissionWatchTask: Task<Void, Never>?
   private var sessionStartTask: Task<Void, Never>?
+  /// The in-flight finish, tracked like `sessionStartTask` so termination can
+  /// wait for it. Untracked, it raced `shutDown()` and the last sentence was
+  /// inserted or dropped depending on which task the scheduler ran first.
+  private var finishTask: Task<Void, Never>?
   private var isPrepared = false
   private var preparationFailureMessage: String?
   private var currentSessionSettings: DictationSessionSettings?
@@ -169,11 +173,27 @@ final class DirectDictationController {
     return SpeechLanguageCatalog.tag(for: locale)
   }
 
+  /// True while a released trigger is still being turned into inserted text.
+  /// Termination waits on this rather than racing it.
+  var isFinishing: Bool { finishTask != nil }
+
+  /// Waits for an in-flight finish to insert its text, giving up after
+  /// `timeout` so a stuck insertion cannot hold the quit forever. Giving up
+  /// only stops the waiting; the finish keeps running until the process goes.
+  func waitForFinish(timeout: Duration) async {
+    guard let finishTask else { return }
+    await awaitValue(of: finishTask, orGiveUpAfter: timeout)
+  }
+
   func stop() {
     noSpeechTask?.cancel()
     permissionTask?.cancel()
     permissionWatchTask?.cancel()
     sessionStartTask?.cancel()
+    // Cancelled last and only here: by this point termination has already
+    // given it its window through waitForFinish, so anything still running
+    // has missed its chance and must not race the shutdown below.
+    finishTask?.cancel()
     keyEventMonitor?.stop()
     isPrepared = false
 
@@ -432,8 +452,9 @@ final class DirectDictationController {
   ///
   /// - Parameter speakingDuration: The completed session's measured speech time.
   private func finishRecognition(speakingDuration: TimeInterval) {
-    Task { [weak self] in
+    finishTask = Task { [weak self] in
       guard let self else { return }
+      defer { finishTask = nil }
       do {
         let text = try await speechService.finish()
         hudController.hide()
