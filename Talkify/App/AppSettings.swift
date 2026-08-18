@@ -15,6 +15,7 @@ final class AppSettings {
   private enum Keys {
     static let soundSet = "dictationSoundSet"
     static let soundsEnabled = "dictationSoundsEnabled"
+    static let duckOtherAudio = "duckOtherAudioWhileDictating"
     static let soundVolume = "dictationSoundVolume"
     static let voiceVisual = "hudVoiceVisual"
     static let waveformStyle = "hudWaveformStyle"
@@ -38,6 +39,13 @@ final class AppSettings {
 
   var soundSet: DictationSoundSet {
     didSet { defaults.set(soundSet.rawValue, forKey: Keys.soundSet) }
+  }
+
+  /// Lowers the system output while a session listens. Off by default: it
+  /// moves a system-wide control, which is not something to start doing to
+  /// someone who did not ask for it.
+  var duckOtherAudioWhileDictating: Bool {
+    didSet { defaults.set(duckOtherAudioWhileDictating, forKey: Keys.duckOtherAudio) }
   }
 
   var dictationSoundsEnabled: Bool {
@@ -175,6 +183,7 @@ final class AppSettings {
     self.defaults = defaults
     soundSet = Self.stored(in: defaults, key: Keys.soundSet) ?? .synth8
     dictationSoundsEnabled = defaults.object(forKey: Keys.soundsEnabled) as? Bool ?? true
+    duckOtherAudioWhileDictating = defaults.object(forKey: Keys.duckOtherAudio) as? Bool ?? false
     let storedSoundVolume = defaults.object(forKey: Keys.soundVolume) as? Double ?? 0.5
     storedDictationSoundVolume = DictationSoundSettings.normalizedVolume(storedSoundVolume)
     transcriptDestination = Self.stored(in: defaults, key: Keys.transcriptDestination) ?? .besideSource
@@ -226,6 +235,9 @@ final class AppSettings {
 /// this value until its end and paste sounds have played.
 struct DictationSessionSettings: Equatable {
   let sounds: DictationSoundSettings
+  /// Captured with everything else: a session that started while ducking was
+  /// on has to restore the volume even if the toggle flips mid-session.
+  let ducksOtherAudio: Bool
   let voiceVisual: HUDVoiceVisualStyle
   let waveformStyle: HUDWaveformStyle
   let revealStyle: HUDRevealStyle
@@ -249,6 +261,7 @@ struct DictationSessionSettings: Equatable {
       isEnabled: settings.dictationSoundsEnabled,
       volume: settings.dictationSoundVolume
     )
+    ducksOtherAudio = settings.duckOtherAudioWhileDictating
     voiceVisual = settings.voiceVisual
     waveformStyle = settings.waveformStyle
     revealStyle = settings.revealStyle
